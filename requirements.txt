@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+websockets
+sounddevice
+numpy
+faster-whisper
+ollama
+rvc-python
+edge-tts
+pydub
