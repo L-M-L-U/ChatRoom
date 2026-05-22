@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>语音克隆聊天室</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+      background: #f5f7fb;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+    }
+    #app {
+      width: 420px;
+      max-width: 94vw;
+      background: #fff;
+      border-radius: 24px;
+      box-shadow: 0 8px 32px rgba(0,0,0,.08);
+      padding: 32px 24px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 16px;
+    }
+    h1 { font-size: 20px; font-weight: 600; color: #1a1a2e; }
+
+    /* ── 角色选择行 ── */
+    .toolbar {
+      width: 100%;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .toolbar label {
+      font-size: 13px;
+      color: #555;
+    }
+    #role-select {
+      padding: 4px 10px;
+      border: 1px solid #d0d5dd;
+      border-radius: 8px;
+      font-size: 13px;
+      background: #fff;
+    }
+
+    /* ── 对话区域 ── */
+    #chat {
+      width: 100%;
+      height: 320px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      padding: 4px 0;
+    }
+    .msg {
+      max-width: 85%;
+      padding: 10px 14px;
+      border-radius: 16px;
+      font-size: 14px;
+      line-height: 1.5;
+      word-break: break-word;
+    }
+    .msg.user {
+      align-self: flex-end;
+      background: #e8f0fe;
+      color: #1a1a2e;
+      border-bottom-right-radius: 4px;
+    }
+    .msg.ai {
+      align-self: flex-start;
+      background: #f0f0f5;
+      color: #1a1a2e;
+      border-bottom-left-radius: 4px;
+    }
+    .msg .label {
+      font-size: 11px;
+      font-weight: 500;
+      margin-bottom: 4px;
+      opacity: .55;
+    }
+    #status {
+      font-size: 13px;
+      color: #888;
+      min-height: 1.4em;
+      text-align: center;
+    }
+
+    /* ── 识别文字区域 ── */
+    #recognizedText {
+      width: 100%;
+      min-height: 36px;
+      padding: 8px 12px;
+      background: #f8f9fc;
+      border-radius: 10px;
+      font-size: 13px;
+      color: #555;
+      text-align: center;
+      word-break: break-word;
+    }
+
+    /* ── 录音按钮 ── */
+    #record-btn {
+      width: 80px;
+      height: 80px;
+      border-radius: 50%;
+      border: none;
+      background: #4a6cf7;
+      color: #fff;
+      font-size: 15px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: transform .15s, background .15s, box-shadow .25s;
+      box-shadow: 0 4px 14px rgba(74,108,247,.35);
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    #record-btn:active,
+    #record-btn.recording {
+      transform: scale(1.08);
+      background: #e74c3c;
+      box-shadow: 0 4px 20px rgba(231,76,60,.45);
+    }
+    #record-btn:disabled {
+      opacity: .5;
+      cursor: not-allowed;
+      transform: none;
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <h1>🎙 语音聊天室</h1>
+    <div class="toolbar">
+      <label for="role-select">当前角色</label>
+      <select id="role-select"><option value="">加载中…</option></select>
+    </div>
+    <div id="chat"></div>
+    <div id="recognizedText">👂 等待语音输入…</div>
+    <div id="status">连接中…</div>
+    <button id="record-btn" disabled>按住 说话</button>
+  </div>
+  <script>
+    const WS_URL = "ws://localhost:8765";
+
+    const chatEl = document.getElementById("chat");
+    const statusEl = document.getElementById("status");
+    const btn = document.getElementById("record-btn");
+    const roleSelect = document.getElementById("role-select");
+    const recogText = document.getElementById("recognizedText");
+
+    let audioCtx = null;
+    let mediaStream = null;
+    let scriptNode = null;
+    let sourceNode = null;
+    let ws = null;
+    let isRecording = false;
+    let pcmChunks = [];
+
+    /* ============ WebSocket ============ */
+    function connectWS() {
+      ws = new WebSocket(WS_URL);
+      ws.binaryType = "arraybuffer";
+
+      ws.onopen = () => {
+        statusEl.textContent = "已连接，按住按钮说话";
+        btn.disabled = false;
+        requestRoleList();
+      };
+      ws.onclose = () => {
+        statusEl.textContent = "连接断开，3 秒后重试…";
+        btn.disabled = true;
+        setTimeout(connectWS, 3000);
+      };
+      ws.onerror = () => { ws.close(); };
+      ws.onmessage = (e) => handleMessage(e.data);
+    }
+
+    /* ============ 消息分发 ============ */
+    function handleMessage(data) {
+      if (typeof data === "string") {
+        const msg = JSON.parse(data);
+        if (msg.type === "reply") {
+          // 显示 STT 识别文字
+          if (msg.stt_text) {
+            recogText.textContent = "🗣️ " + msg.stt_text;
+          }
+          addMessage("ai", msg.text, msg.role);
+          statusEl.textContent = "已收到回复";
+        } else if (msg.type === "role_selected") {
+          if (msg.success) {
+            roleSelect.value = msg.current_role;
+            statusEl.textContent = `已切换至 ${msg.current_role}`;
+          }
+          populateRoles(msg.roles, msg.current_role);
+        }
+        return;
+      }
+
+      // 二进制 = WAV 音频，自动播放
+      const blob = new Blob([data], { type: "audio/wav" });
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      audio.onended = () => URL.revokeObjectURL(url);
+      audio.play().catch(() => {});
+    }
+
+    /* ============ 角色管理 ============ */
+    function requestRoleList() {
+      ws.send(JSON.stringify({ type: "select_role", role: "lisa" }));
+    }
+
+    function populateRoles(roles, current) {
+      roleSelect.innerHTML = "";
+      for (const r of roles) {
+        const opt = document.createElement("option");
+        opt.value = r.name;
+        opt.textContent = r.name + (r.description ? ` — ${r.description}` : "");
+        if (r.name === current) opt.selected = true;
+        roleSelect.appendChild(opt);
+      }
+    }
+
+    roleSelect.addEventListener("change", () => {
+      const role = roleSelect.value;
+      if (!role || !ws || ws.readyState !== WebSocket.OPEN) return;
+      ws.send(JSON.stringify({ type: "select_role", role }));
+      statusEl.textContent = `正在切换角色…`;
+    });
+
+    /* ============ 录音 ============ */
+    async function ensureAudio() {
+      if (audioCtx) return;
+      audioCtx = new AudioContext({ sampleRate: 16000 });
+      mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    }
+
+    function downsample(buffer, srcRate, dstRate) {
+      if (srcRate === dstRate) return buffer;
+      const ratio = srcRate / dstRate;
+      const len = Math.round(buffer.length / ratio);
+      const out = new Float32Array(len);
+      for (let i = 0; i < len; i++) {
+        out[i] = buffer[Math.min(Math.round(i * ratio), buffer.length - 1)];
+      }
+      return out;
+    }
+
+    function startRecording() {
+      if (isRecording) return;
+      isRecording = true;
+      pcmChunks = [];
+      btn.classList.add("recording");
+      btn.textContent = "松开 发送";
+      statusEl.textContent = "录音中…";
+
+      const srcRate = audioCtx.sampleRate;
+      const bufSize = 4096;
+
+      scriptNode = audioCtx.createScriptProcessor(bufSize, 1, 1);
+      sourceNode = audioCtx.createMediaStreamSource(mediaStream);
+      sourceNode.connect(scriptNode);
+      scriptNode.connect(audioCtx.destination);
+
+      scriptNode.onaudioprocess = (e) => {
+        if (!isRecording) return;
+        const ch = e.inputBuffer.getChannelData(0);
+        pcmChunks.push(srcRate === 16000 ? ch : downsample(ch, srcRate, 16000));
+      };
+    }
+
+    function stopRecording() {
+      if (!isRecording) return;
+      isRecording = false;
+      btn.classList.remove("recording");
+      btn.textContent = "按住 说话";
+
+      if (scriptNode) { scriptNode.disconnect(); scriptNode = null; }
+      if (sourceNode) { sourceNode.disconnect(); sourceNode = null; }
+
+      if (pcmChunks.length === 0) {
+        statusEl.textContent = "按住按钮说话";
+        return;
+      }
+
+      const total = pcmChunks.reduce((s, c) => s + c.length, 0);
+      const merged = new Float32Array(total);
+      let off = 0;
+      for (const c of pcmChunks) { merged.set(c, off); off += c.length; }
+
+      const int16 = new Int16Array(merged.length);
+      for (let i = 0; i < merged.length; i++) {
+        const s = Math.max(-1, Math.min(1, merged[i]));
+        int16[i] = s < 0 ? s * 32768 : s * 32767;
+      }
+
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(int16.buffer);
+        recogText.textContent = "⏳ 正在识别语音…";
+        statusEl.textContent = "等待回复…";
+      } else {
+        statusEl.textContent = "连接断开，无法发送";
+      }
+    }
+
+    /* ============ UI ============ */
+    function addMessage(role, text, roleName) {
+      const div = document.createElement("div");
+      div.className = `msg ${role}`;
+      div.innerHTML =
+        `<div class="label">${role === "user" ? "你" : roleName || "AI"}</div>${text}`;
+      chatEl.appendChild(div);
+      chatEl.scrollTop = chatEl.scrollHeight;
+    }
+
+    /* ============ 按钮事件 ============ */
+    btn.addEventListener("mousedown", async (e) => {
+      e.preventDefault();
+      try { await ensureAudio(); startRecording(); }
+      catch { statusEl.textContent = "麦克风权限被拒绝"; }
+    });
+    btn.addEventListener("mouseup", stopRecording);
+    btn.addEventListener("mouseleave", stopRecording);
+
+    btn.addEventListener("touchstart", async (e) => {
+      e.preventDefault();
+      try { await ensureAudio(); startRecording(); }
+      catch { statusEl.textContent = "麦克风权限被拒绝"; }
+    });
+    btn.addEventListener("touchend", stopRecording);
+    btn.addEventListener("touchcancel", stopRecording);
+
+    connectWS();
+  </script>
+</body>
+</html>
